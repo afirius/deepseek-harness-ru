@@ -9,7 +9,7 @@ import { patchMain } from './shell-patch.mjs';
 import { rendererPatches } from './renderer-patch.mjs';
 import { inventoryPatches } from './inventory-patch.mjs';
 
-export const VERSION = '1.2.0';
+export const VERSION = '1.2.1';
 const PACKAGE = '@local/dsh-locale-ru';
 const TARGETS = ['lib/main.js', 'lib/preload-app.cjs', 'lib/preload-welcome.cjs', 'dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js'];
 const ROOT = fileURLToPath(new URL('../', import.meta.url));

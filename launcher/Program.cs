@@ -15,8 +15,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("Community")]
 [assembly: AssemblyProduct("DeepSeek Harness RU Launcher")]
 [assembly: AssemblyCopyright("Unofficial community Russian localization")]
-[assembly: AssemblyVersion("1.2.0.0")]
-[assembly: AssemblyFileVersion("1.2.0.0")]
+[assembly: AssemblyVersion("1.2.1.0")]
+[assembly: AssemblyFileVersion("1.2.1.0")]
 
 namespace DeepSeekHarnessRu
 {
@@ -598,7 +598,7 @@ namespace DeepSeekHarnessRu
                 status.Size = new Size(540, 22);
                 Controls.Add(status);
 
-                Label launchInfo = MakeLabel("После обновления или автоматического перезапуска Harness может запуститься напрямую. Если перевод не восстановился, полностью выйдите и откройте ярлык «DeepSeek Harness — Русский».", 22, 286);
+                Label launchInfo = MakeLabel("После установки привычные ярлыки в меню «Пуск» и на панели задач будут восстанавливать перевод перед запуском. Если обновлятор сразу открыл Harness без перевода, полностью выйдите и откройте его снова.", 22, 286);
                 launchInfo.ForeColor = Color.FromArgb(100, 116, 139);
                 launchInfo.Size = new Size(546, 35);
                 Controls.Add(launchInfo);
