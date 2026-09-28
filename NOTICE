@@ -5,5 +5,7 @@ they do not imply endorsement or affiliation.
 The application executable, ASAR archive, Node.js runtime, account data and
 user conversations are not included in this distribution.
 
-The translations correspond to string identifiers in DeepSeek Harness
-0.1.7-rc.2. Application code is patched locally from the user's installation.
+The translation was validated against DeepSeek Harness 0.1.7-rc.2 on Windows x64.
+Other builds may pass structural checks and be compatible, but compatibility with
+all future versions is not guaranteed. New or changed strings may remain in English.
+Application code is patched locally from the user's installation.

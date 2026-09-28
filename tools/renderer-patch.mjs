@@ -1,87 +1,31 @@
 import { entryFor, readPacked } from './shell-asar.mjs';
+import {
+  addRussianResolverGuard, applyEdits, findFunction, findObjectLiteral,
+  hasBinding, mergeRussian, validateBaseLocaleResolver,
+} from './patch-structure.mjs';
 
-const targets = [
-  'lib/preload-app.cjs',
-  'lib/preload-welcome.cjs',
-];
-
-function keySet(source, name) {
-  const anchor = `const ${name} = {`;
-  if (source.indexOf(anchor) !== source.lastIndexOf(anchor)) {
-    throw new Error(`Renderer template has an ambiguous ${name} dictionary`);
-  }
-  const start = source.indexOf(anchor);
-  if (start < 0) throw new Error(`Renderer template has no ${name} dictionary`);
-  const end = source.indexOf('\n};', start + anchor.length);
-  if (end < 0) throw new Error(`Renderer ${name} dictionary is unterminated`);
-  const matches = [...source.slice(start + anchor.length, end)
-    .matchAll(/^\s*([A-Za-z_$][\w$]*)\s*:/gm)];
-  const keys = matches.map((match) => match[1]);
-  if (keys.length === 0 || new Set(keys).size !== keys.length) {
-    throw new Error(`Renderer ${name} dictionary keys are invalid`);
-  }
-  return keys;
-}
+const targets = ['lib/preload-app.cjs', 'lib/preload-welcome.cjs'];
+const fail = (path, message) => { throw new Error(`Unsupported renderer template ${path}: ${message}`); };
 
 function patchRenderer(source, path, russian) {
-  const enKeys = keySet(source, 'en');
-  const missing = enKeys.filter((key) => !Object.hasOwn(russian, key));
-  const extra = Object.keys(russian).filter((key) => !enKeys.includes(key));
-  if (missing.length || extra.length) {
-    throw new Error(`${path} Russian dictionary mismatch: missing ${missing.length}, extra ${extra.length}`);
+  try {
+    const en = findObjectLiteral(source, 'en');
+    findObjectLiteral(source, 'zh');
+    if (hasBinding(source, 'ru')) fail(path, 'a ru binding already exists');
+    const locale = findFunction(source, 'resolveDesktopLocale');
+    validateBaseLocaleResolver(locale);
+    const overrides = mergeRussian(en.keys, russian);
+    const newline = source.includes('\r\n') ? '\r\n' : '\n';
+    const dictionary = `${newline}/* dsh-shell-ru: renderer locale */${newline}const ru = { ...en, ...${JSON.stringify(overrides, null, '\t')} };`;
+    const declarationEnd = en.end + (source[en.end] === ';' ? 1 : 0);
+    return applyEdits(source, [
+      { at: declarationEnd, from: '', to: dictionary },
+      addRussianResolverGuard(source, locale),
+    ]);
+  } catch (error) {
+    if (error.message.startsWith(`Unsupported renderer template ${path}:`)) throw error;
+    fail(path, error.message);
   }
-  if (Object.values(russian).some((value) => typeof value !== 'string')) {
-    throw new Error(`${path} Russian dictionary values must be strings`);
-  }
-
-  const anchor = 'function resolveDesktopLocale(locale) {';
-  if (source.indexOf(anchor) < 0 || source.indexOf(anchor) !== source.lastIndexOf(anchor)) {
-    throw new Error(`${path} locale resolver anchor is missing or ambiguous`);
-  }
-  if (source.includes('const ru = {') || /messages:\s*ru\b/.test(source)) {
-    throw new Error(`${path} already contains a Russian locale patch`);
-  }
-
-  const from = `function resolveDesktopLocale(locale) {
-	return locale.toLowerCase().startsWith("zh") ? {
-		id: "zh-CN",
-		messages: zh
-	} : {
-		id: "en",
-		messages: en
-	};
-}`;
-  const to = `function resolveDesktopLocale(locale) {
-	if (locale.toLowerCase().startsWith("ru")) return {
-		id: "ru",
-		messages: ru
-	};
-	return locale.toLowerCase().startsWith("zh") ? {
-		id: "zh-CN",
-		messages: zh
-	} : {
-		id: "en",
-		messages: en
-	};
-}`;
-  if (source.indexOf(from) < 0 || source.indexOf(from) !== source.lastIndexOf(from)) {
-    throw new Error(`${path} locale resolver shape is unsupported`);
-  }
-
-  const dictionary = `/* dsh-shell-ru: renderer locale */\nconst ru = ${JSON.stringify(russian, null, '\t')};\n`;
-  let patched = source.replace(from, to);
-  const insertAt = patched.indexOf(anchor);
-  patched = patched.slice(0, insertAt) + dictionary + patched.slice(insertAt);
-
-  const emitted = /\/\* dsh-shell-ru: renderer locale \*\/\nconst ru = (\{[\s\S]*?\n\});\n/.exec(patched);
-  if (!emitted || JSON.stringify(JSON.parse(emitted[1])) !== JSON.stringify(russian)) {
-    throw new Error(`${path} Russian dictionary serialization did not round-trip`);
-  }
-  if ((patched.match(/messages: ru\b/g) ?? []).length !== 1 ||
-      (patched.match(/if \(locale\.toLowerCase\(\)\.startsWith\("ru"\)\)/g) ?? []).length !== 1) {
-    throw new Error(`${path} Russian resolver wiring is invalid`);
-  }
-  return patched;
 }
 
 /** Return renderer-side locale patches from packed baseline ASAR entries. */

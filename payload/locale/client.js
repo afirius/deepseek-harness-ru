@@ -1,5 +1,4 @@
-// Generated file. Edit i18n/ru-locale/client.js.template, i18n/ru-overrides.json
-// or i18n/ru-plurals.json and re-run tools/build-locale.mjs instead of editing here.
+// Self-contained browser locale bundle distributed with the patcher.
 /**
  * Browser half of the Russian localization bundle.
  *
@@ -30,6 +29,12 @@ window.__ModuleLoader__.load({
     return {
       inject: ['locale'],
       apply(ctx) {
+        // If a future Harness changes the locale API, leave its UI operational.
+        if (!ctx.locale || typeof ctx.effect !== 'function' ||
+            ['addLanguage', 'register', 'setLocale'].some(name => typeof ctx.locale[name] !== 'function')) {
+          console.warn('Russian locale: incompatible locale API; translation was not activated.');
+          return;
+        }
         ctx.effect(
           () => ctx.locale.addLanguage(LANGUAGE),
           'locale-ru: language definition',

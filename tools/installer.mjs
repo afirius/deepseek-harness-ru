@@ -4,14 +4,13 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readArchive, readPacked, entryFor, verifyPayload, withHeader, atomicWrite, digest } from './shell-asar.mjs';
+import { readArchive, readPacked, entryFor, verifyPayload, withHeader, atomicWrite } from './shell-asar.mjs';
 import { patchMain } from './shell-patch.mjs';
 import { rendererPatches } from './renderer-patch.mjs';
 
-export const VERSION = '1.0.0';
+export const VERSION = '1.1.0';
 const PACKAGE = '@local/dsh-locale-ru';
-const SUPPORTED = '0.1.7-rc.2';
-const MAIN_HASH = '680cb6325bdb02ec0e3d186b058c442d5ecee1b4eb21ed7a279ffdadecf1e408';
+const TARGETS = ['lib/main.js', 'lib/preload-app.cjs', 'lib/preload-welcome.cjs'];
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const readJSON = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const jsonBytes = value => Buffer.from(JSON.stringify(value, null, 2) + '\n');
@@ -41,40 +40,73 @@ export function ensureStopped() {
 
 export function inspect(loc) {
   const archive = readArchive(loc.asar);
-  let baseline = structuredClone(archive.header), state = null;
+  let baseline = structuredClone(archive.header), state = null, updated = false;
+  // An updater may replace app.asar while keeping our backup directory. Never
+  // apply an old header to new payload bytes. A fresh archive must contain all
+  // original packed targets and pass its own checksums before we adopt it.
+  const freshArchive = () => TARGETS.every(name => {
+    const entry = entryFor(archive.header, name.split('/'));
+    return entry && !entry.unpacked && !entry.link && entry.integrity?.algorithm === 'SHA256';
+  });
   if (has(loc.state)) {
     state = readJSON(loc.state);
     if (state.schema !== 1 || path.resolve(state.install) !== loc.install || path.resolve(state.home) !== loc.home)
       throw new Error('Резервная копия относится к другому каталогу программы или профилю.');
-    baseline = readJSON(path.join(loc.work, state.header));
+    if (state.header !== 'original-header.json' || !Array.isArray(state.entries) ||
+        state.entries.some(name => !TARGETS.includes(name))) throw new Error('Неизвестный формат состояния патчера.');
+    if (state.status === 'installed') {
+      const targets = [loc.package, loc.module];
+      if (!state.previousProfile || !Array.isArray(state.previousDirectories) ||
+          state.previousDirectories.length !== targets.length || new Set(state.previousDirectories.map(item => item.target)).size !== targets.length)
+        throw new Error('В состоянии патчера отсутствуют данные для безопасного отката профиля.');
+      for (const item of state.previousDirectories) {
+        const relative = typeof item.backup === 'string' ? path.relative(path.join(loc.work, 'backups'), path.resolve(item.backup)) : '..';
+        if (!targets.includes(item.target) || typeof item.present !== 'boolean' || !relative || relative.startsWith('..') || path.isAbsolute(relative))
+          throw new Error('Некорректные пути резервной копии плагина.');
+      }
+    }
+    const previous = readJSON(path.join(loc.work, state.header));
     const expected = structuredClone(archive.header);
     for (const name of state.entries) {
       const parts = name.split('/');
       const parent = entryFor(expected, parts.slice(0, -1));
-      parent.files[parts.at(-1)] = entryFor(baseline, parts);
+      if (parent?.files) parent.files[parts.at(-1)] = entryFor(previous, parts);
     }
-    if (!same(expected, baseline)) throw new Error('Приложение обновилось или архив изменён другим патчем. Старый перевод к этой сборке применять нельзя.');
+    if (same(expected, previous)) {
+      // Same-sized upstream edits may retain the same header shape. Validate
+      // against the saved integrity metadata before accepting the old baseline.
+      try { verifyPayload(archive, previous); baseline = previous; }
+      catch (error) { if (!freshArchive()) throw error; updated = true; }
+    } else {
+      if (!freshArchive()) throw new Error('Архив изменён и содержит распакованные патчи. Восстановите приложение перед установкой перевода.');
+      updated = true;
+    }
   } else {
     const legacy = loc.asar + '.unpacked/lib/main.js.header.bak';
-    if (has(legacy)) {
-      baseline = readJSON(legacy);
+    if (has(legacy) && !freshArchive()) {
+      const previous = readJSON(legacy);
       const expected = structuredClone(archive.header);
-      expected.files.lib.files['main.js'] = baseline.files.lib.files['main.js'];
-      if (!same(expected, baseline)) throw new Error('Старый резервный заголовок не соответствует установленной версии.');
+      expected.files.lib.files['main.js'] = previous.files.lib.files['main.js'];
+      if (!same(expected, previous)) throw new Error('Старый резервный заголовок не соответствует установленной версии.');
+      baseline = previous;
     }
   }
-  const pkg = JSON.parse(readPacked(archive, entryFor(baseline, ['package.json'])).toString('utf8'));
-  if (pkg.version !== SUPPORTED || pkg.name !== '@deepseek-ai/dsh-desktop')
-    throw new Error(`Поддерживается DeepSeek Harness ${SUPPORTED}, обнаружена версия ${pkg.version}. Файлы не изменены.`);
   const count = verifyPayload(archive, baseline);
+  const pkg = JSON.parse(readPacked(archive, entryFor(baseline, ['package.json'])).toString('utf8'));
+  if (pkg.name !== '@deepseek-ai/dsh-desktop' || typeof pkg.version !== 'string')
+    throw new Error('Выбранный архив не является DeepSeek Harness. Файлы не изменены.');
+  for (const name of TARGETS) {
+    const entry = entryFor(baseline, name.split('/'));
+    if (!entry || entry.unpacked || entry.link || entry.integrity?.algorithm !== 'SHA256')
+      throw new Error('Не найден исходный файл с контрольной суммой: ' + name);
+  }
   const main = readPacked(archive, entryFor(baseline, ['lib', 'main.js']));
-  if (digest(main) !== MAIN_HASH) throw new Error('Исходный main.js отличается от проверенной сборки. Файлы не изменены.');
   if (!has(loc.node)) throw new Error('Не найден Node.js из комплекта DeepSeek Harness. Восстановите установку приложения.');
   if (!has(loc.manifest)) throw new Error('Профиль desktop ещё не создан. Запустите DeepSeek Harness один раз и закройте его.');
   const manifest = readJSON(loc.manifest);
   if (!Array.isArray(manifest.dsh?.profile?.bundles) || !manifest.dependencies || typeof manifest.dependencies !== 'object')
     throw new Error('Неизвестный формат профиля desktop. Файлы не изменены.');
-  return { archive, baseline, state, manifest, count, version: pkg.version, main: main.toString('utf8') };
+  return { archive, baseline, state, manifest, count, updated, version: pkg.version, main: main.toString('utf8') };
 }
 
 function syntax(node, code, module = true) {
@@ -208,10 +240,11 @@ export function operate(action, loc, { stopped = ensureStopped, log = console.lo
   else if (pendingTransactions(loc).length) throw new Error('Найдена незавершённая установка. Закройте Harness и нажмите «Установить русский» или «Удалить перевод»: сначала будет восстановлено прежнее состояние.');
   const info = inspect(loc);
   log(`DeepSeek Harness ${info.version}. Проверены контрольные суммы ${info.count} файлов.`);
+  if (info.updated) log('Обнаружен новый архив приложения. Совместимость проверяется заново; старый заголовок не используется.');
   if (action === 'check') {
     const built = getTranslations(loc, info);
-    log(`Совместимость подтверждена. Перевод оболочки: ${built.patches.size} файла; 138 строк. Веб-интерфейс: 2639 строк.`);
-    log(info.state?.status === 'installed' ? 'Перевод установлен.' : 'Можно установить перевод.');
+    log(`Структура оболочки совместима: ${built.patches.size} файла. В словарях перевода: 138 строк оболочки и 2639 строк веб-интерфейса. Новые ключи используют английский текст.`);
+    log(info.state?.status === 'installed' && !info.updated ? 'Перевод установлен.' : 'Можно установить перевод.');
     return;
   }
   if (action === 'uninstall') {
