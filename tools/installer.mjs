@@ -3,14 +3,15 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { readArchive, readPacked, entryFor, verifyPayload, withHeader, atomicWrite } from './shell-asar.mjs';
 import { patchMain } from './shell-patch.mjs';
 import { rendererPatches } from './renderer-patch.mjs';
+import { inventoryPatches } from './inventory-patch.mjs';
 
-export const VERSION = '1.1.0';
+export const VERSION = '1.2.0';
 const PACKAGE = '@local/dsh-locale-ru';
-const TARGETS = ['lib/main.js', 'lib/preload-app.cjs', 'lib/preload-welcome.cjs'];
+const TARGETS = ['lib/main.js', 'lib/preload-app.cjs', 'lib/preload-welcome.cjs', 'dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js'];
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const readJSON = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const jsonBytes = value => Buffer.from(JSON.stringify(value, null, 2) + '\n');
@@ -20,9 +21,12 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 export function locations(install, home) {
   const resources = path.join(path.resolve(install), 'resources');
   const profile = path.join(path.resolve(home), 'profiles', 'desktop');
+  const installKey = createHash('sha256').update(path.resolve(install).toLowerCase()).digest('hex').slice(0, 16);
+  const work = path.join(path.resolve(home), 'localization', 'ru-patcher', installKey);
+  const legacyWork = path.join(resources, 'dsh-ru-patch');
   return { install: path.resolve(install), home: path.resolve(home), resources, profile,
-    asar: path.join(resources, 'app.asar'), work: path.join(resources, 'dsh-ru-patch'),
-    state: path.join(resources, 'dsh-ru-patch', 'state.json'),
+    asar: path.join(resources, 'app.asar'), work, legacyWork,
+    state: path.join(work, 'state.json'), legacyState: path.join(legacyWork, 'state.json'),
     manifest: path.join(profile, 'package.json'),
     package: path.join(profile, 'locales', 'ru'),
     module: path.join(profile, 'node_modules', '@local', 'dsh-locale-ru'),
@@ -48,8 +52,10 @@ export function inspect(loc) {
     const entry = entryFor(archive.header, name.split('/'));
     return entry && !entry.unpacked && !entry.link && entry.integrity?.algorithm === 'SHA256';
   });
-  if (has(loc.state)) {
-    state = readJSON(loc.state);
+  const stateWork = has(loc.state) ? loc.work : loc.legacyWork;
+  const stateFile = path.join(stateWork, 'state.json');
+  if (has(stateFile)) {
+    state = readJSON(stateFile);
     if (state.schema !== 1 || path.resolve(state.install) !== loc.install || path.resolve(state.home) !== loc.home)
       throw new Error('Резервная копия относится к другому каталогу программы или профилю.');
     if (state.header !== 'original-header.json' || !Array.isArray(state.entries) ||
@@ -60,12 +66,12 @@ export function inspect(loc) {
           state.previousDirectories.length !== targets.length || new Set(state.previousDirectories.map(item => item.target)).size !== targets.length)
         throw new Error('В состоянии патчера отсутствуют данные для безопасного отката профиля.');
       for (const item of state.previousDirectories) {
-        const relative = typeof item.backup === 'string' ? path.relative(path.join(loc.work, 'backups'), path.resolve(item.backup)) : '..';
+        const relative = typeof item.backup === 'string' ? path.relative(path.join(stateWork, 'backups'), path.resolve(item.backup)) : '..';
         if (!targets.includes(item.target) || typeof item.present !== 'boolean' || !relative || relative.startsWith('..') || path.isAbsolute(relative))
           throw new Error('Некорректные пути резервной копии плагина.');
       }
     }
-    const previous = readJSON(path.join(loc.work, state.header));
+    const previous = readJSON(path.join(stateWork, state.header));
     const expected = structuredClone(archive.header);
     for (const name of state.entries) {
       const parts = name.split('/');
@@ -106,7 +112,7 @@ export function inspect(loc) {
   const manifest = readJSON(loc.manifest);
   if (!Array.isArray(manifest.dsh?.profile?.bundles) || !manifest.dependencies || typeof manifest.dependencies !== 'object')
     throw new Error('Неизвестный формат профиля desktop. Файлы не изменены.');
-  return { archive, baseline, state, manifest, count, updated, version: pkg.version, main: main.toString('utf8') };
+  return { archive, baseline, state, manifest, count, updated, legacyState: stateWork !== loc.work && state !== null, version: pkg.version, main: main.toString('utf8') };
 }
 
 function syntax(node, code, module = true) {
@@ -189,7 +195,7 @@ export function recoverPending(loc) {
     const journal = readJSON(path.join(directory, 'journal.json'));
     for (const action of journal.actions) {
       if (!['file', 'directory'].includes(action.type) ||
-          !(inside(action.target, loc.install) || inside(action.target, loc.profile)) || !inside(action.backup, directory))
+          !(inside(action.target, loc.install) || inside(action.target, loc.profile) || inside(action.target, loc.work)) || !inside(action.backup, directory))
         throw new Error('Некорректные пути в журнале восстановления: ' + directory);
     }
     const tx = Object.assign(Object.create(Transaction.prototype), { loc, directory, actions: journal.actions, status: 'pending' });
@@ -210,7 +216,7 @@ function runTransaction(loc, fn) {
 
 function getTranslations(loc, info) {
   const russian = readJSON(path.join(ROOT, 'payload', 'shell-ru.json'));
-  const patches = new Map([['lib/main.js', patchMain(info.main, russian)], ...rendererPatches(info.archive, info.baseline, russian)]);
+  const patches = new Map([['lib/main.js', patchMain(info.main, russian)], ...rendererPatches(info.archive, info.baseline, russian), ...inventoryPatches(info.archive, info.baseline)]);
   for (const [name, code] of patches) syntax(loc.node, code, !name.endsWith('.cjs'));
   syntax(loc.node, fs.readFileSync(path.join(ROOT, 'payload/locale/client.js'), 'utf8'), false);
   const header = structuredClone(info.baseline);
@@ -226,7 +232,7 @@ function getTranslations(loc, info) {
 
 function localePayload(activation) {
   const files = new Map();
-  for (const name of ['package.json', 'index.js', 'client.js', 'cordis.patch.yml', 'dictionaries.json']) {
+  for (const name of ['package.json', 'index.js', 'client.js', 'cordis.patch.yml', 'dictionaries.json', 'locale/en.json', 'locale/ru.json']) {
     let data = fs.readFileSync(path.join(ROOT, 'payload/locale', name));
     if (name === 'client.js') data = Buffer.from(data.toString('utf8').replaceAll('__DSH_RU_ACTIVATION__', activation));
     files.set(name, data);
@@ -236,8 +242,9 @@ function localePayload(activation) {
 
 export function operate(action, loc, { stopped = ensureStopped, log = console.log } = {}) {
   if (!['check', 'install', 'uninstall'].includes(action)) throw new Error('Неизвестное действие: ' + action);
-  if (action !== 'check') { stopped(); recoverPending(loc); }
-  else if (pendingTransactions(loc).length) throw new Error('Найдена незавершённая установка. Закройте Harness и нажмите «Установить русский» или «Удалить перевод»: сначала будет восстановлено прежнее состояние.');
+  const legacyLoc = { ...loc, work: loc.legacyWork };
+  if (action !== 'check') { stopped(); recoverPending(legacyLoc); recoverPending(loc); }
+  else if (pendingTransactions(loc).length || pendingTransactions(legacyLoc).length) throw new Error('Найдена незавершённая установка. Закройте Harness и нажмите «Установить русский» или «Удалить перевод»: сначала будет восстановлено прежнее состояние.');
   const info = inspect(loc);
   log(`DeepSeek Harness ${info.version}. Проверены контрольные суммы ${info.count} файлов.`);
   if (info.updated) log('Обнаружен новый архив приложения. Совместимость проверяется заново; старый заголовок не используется.');
@@ -259,6 +266,7 @@ export function operate(action, loc, { stopped = ensureStopped, log = console.lo
       throw new Error('Не найдена резервная копия прежнего плагина: ' + item.backup);
     const archive = withHeader(info.archive, info.baseline);
     const backup = runTransaction(loc, tx => {
+      tx.file(path.join(loc.work, 'original-header.json'), jsonBytes(info.baseline));
       tx.file(loc.asar, archive);
       tx.file(loc.manifest, jsonBytes(manifest));
       for (const item of info.state.previousDirectories ?? []) tx.directorySwap(item.target, item.present ? item.backup : null);
@@ -281,7 +289,7 @@ export function operate(action, loc, { stopped = ensureStopped, log = console.lo
   const payloadSame = [loc.package, loc.module].every(dir =>
     [...payload].every(([file, bytes]) =>
       has(path.join(dir, file)) && fs.readFileSync(path.join(dir, file)).equals(bytes)));
-  if (info.state?.status === 'installed' && built.buffer.equals(info.archive.buffer) && expected && payloadSame && same(manifest, info.manifest)) {
+  if (!info.legacyState && info.state?.status === 'installed' && built.buffer.equals(info.archive.buffer) && expected && payloadSame && same(manifest, info.manifest)) {
     log('Русский перевод уже установлен и прошёл проверку. Изменения не требуются.'); return;
   }
   const backup = runTransaction(loc, tx => {
@@ -295,8 +303,19 @@ export function operate(action, loc, { stopped = ensureStopped, log = console.lo
     const previousProfile = info.state?.status === 'installed' ? info.state.previousProfile : {
       dependencyPresent: Object.hasOwn(info.manifest.dependencies, PACKAGE), dependency: info.manifest.dependencies[PACKAGE],
       bundle: info.manifest.dsh.profile.bundles.includes(PACKAGE), bundleIndex: info.manifest.dsh.profile.bundles.indexOf(PACKAGE) };
-    const previousDirectories = info.state?.status === 'installed' ? info.state.previousDirectories
+    let previousDirectories = info.state?.status === 'installed' ? info.state.previousDirectories
       : tx.actions.filter(a => a.type === 'directory').map(({ target, backup, present }) => ({ target, backup, present }));
+    // Move legacy rollback snapshots out of the updater-owned resources folder.
+    if (info.legacyState && info.state?.status === 'installed') {
+      previousDirectories = previousDirectories.map((item, index) => {
+        const backup = path.join(tx.directory, 'legacy-' + index + '.directory');
+        if (item.present) {
+          if (!has(item.backup)) throw new Error('Не найдена прежняя резервная копия плагина: ' + item.backup);
+          tx.directorySwap(backup, item.backup);
+        }
+        return { ...item, backup };
+      });
+    }
     // Make recovery metadata durable before committing the archive header.
     tx.file(loc.state, jsonBytes({ schema: 1, status: 'installed', patchVersion: VERSION,
       appVersion: info.version, install: loc.install, home: loc.home, header: 'original-header.json',

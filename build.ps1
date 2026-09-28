@@ -14,7 +14,7 @@ $Compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path -LiteralPath $Compiler -PathType Leaf)) { throw "Не найден компилятор .NET Framework: $Compiler" }
 if (-not (Test-Path -LiteralPath $ToolsDir -PathType Container)) { throw "Не найдена папка tools: $ToolsDir" }
 if (-not (Test-Path -LiteralPath $PayloadDir -PathType Container)) { throw "Не найдена папка payload: $PayloadDir" }
-foreach ($tool in @('installer.mjs', 'shell-asar.mjs', 'shell-patch.mjs', 'renderer-patch.mjs', 'patch-structure.mjs')) {
+foreach ($tool in @('installer.mjs', 'shell-asar.mjs', 'shell-patch.mjs', 'renderer-patch.mjs', 'patch-structure.mjs', 'inventory-patch.mjs', 'setup-launcher.ps1')) {
     if (-not (Test-Path -LiteralPath (Join-Path $ToolsDir $tool) -PathType Leaf)) { throw "Не найден tools\$tool." }
 }
 if (-not (Test-Path -LiteralPath (Join-Path $LauncherDir 'Program.cs') -PathType Leaf)) { throw 'Не найден launcher\Program.cs.' }

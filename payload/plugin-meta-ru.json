@@ -1,0 +1,52 @@
+{
+  "@deepseek-ai/dsh-persona": {
+    "title": "Персона",
+    "description": "Персона, заданная в составе приложения и добавляемая в системный промпт DeepSeek Harness.",
+    "englishDescription": "Composition-authored deployment persona section for the DeepSeek Harness"
+  },
+  "@deepseek-ai/dsh-agent-instructions": {
+    "title": "Инструкции агента",
+    "description": "Контекст инструкций из файлов AGENTS.md и CLAUDE.md в рабочей области.",
+    "englishDescription": "Workspace context loader for AGENTS.md/CLAUDE.md instruction files"
+  },
+  "@deepseek-ai/dsh-tool-bash": {
+    "title": "Инструмент Bash",
+    "description": "Инструмент bash для модели с поддержкой фоновых задач и повышения уровня песочницы.",
+    "englishDescription": "Model-facing bash tool with optional generic background-job and sandbox-escalation support"
+  },
+  "@deepseek-ai/dsh-tool-pwsh": {
+    "title": "Инструмент PowerShell",
+    "description": "Инструмент pwsh, работающий через механизм выполнения bash.",
+    "englishDescription": "Model-facing pwsh tool over the bash executor seam"
+  },
+  "@deepseek-ai/dsh-tool-fs": {
+    "title": "Инструменты файловой системы",
+    "description": "Инструменты чтения, записи и редактирования файлов через файловый интерфейс DeepSeek Harness.",
+    "englishDescription": "Model-facing filesystem tools (read, write, edit) over the DeepSeek Harness filesystem seam (ctx.fs)"
+  },
+  "@deepseek-ai/dsh-tool-fs-search": {
+    "title": "Поиск по файловой системе",
+    "description": "Инструменты поиска файлов и текста (glob, grep) на основе встроенного ripgrep.",
+    "englishDescription": "Model-facing filesystem discovery tools (glob, grep) backed by the packaged ripgrep binary (@vscode/ripgrep)"
+  },
+  "@deepseek-ai/dsh-tool-jobs": {
+    "title": "Фоновые задания",
+    "description": "Инструменты управления фоновыми процессами: job_output, job_list и job_kill через ctx.jobs.",
+    "englishDescription": "Model-facing background job control tools (job_output, job_list, job_kill) over the ctx.jobs registry"
+  },
+  "@deepseek-ai/dsh-skill-filesystem": {
+    "title": "Навык работы с файлами",
+    "description": "Локальный поставщик навыков работы с файловой системой для DeepSeek Harness.",
+    "englishDescription": "Local filesystem skill provider for the DeepSeek Harness"
+  },
+  "@deepseek-ai/dsh-tool-skill": {
+    "title": "Инструмент навыков",
+    "description": "Инструмент модели для загрузки навыков DeepSeek Harness.",
+    "englishDescription": "Model-facing skill loading tool for the DeepSeek Harness"
+  },
+  "@deepseek-ai/dsh-command-goal": {
+    "title": "Команда управления целью",
+    "description": "Команда для работы с сохранёнными целями текущей сессии.",
+    "englishDescription": "Human-facing slash command for persisted same-session goals"
+  }
+}

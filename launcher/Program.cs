@@ -5,6 +5,7 @@ using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
@@ -14,8 +15,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("Community")]
 [assembly: AssemblyProduct("DeepSeek Harness RU Launcher")]
 [assembly: AssemblyCopyright("Unofficial community Russian localization")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 namespace DeepSeekHarnessRu
 {
@@ -56,6 +57,7 @@ namespace DeepSeekHarnessRu
                 if (arg == "--check") { parsed.Action = "check"; modeCount++; }
                 else if (arg == "--install") { parsed.Action = "install"; modeCount++; }
                 else if (arg == "--uninstall") { parsed.Action = "uninstall"; modeCount++; }
+                else if (arg == "--launch") { parsed.Action = "launch"; modeCount++; }
                 else if (arg == "--self-test") { parsed.SelfTest = true; modeCount++; }
                 else if (arg == "--install-dir" || arg == "--dsh-home" || arg == "--log")
                 {
@@ -68,7 +70,8 @@ namespace DeepSeekHarnessRu
                 else { error = "Неизвестный параметр: " + arg; return false; }
             }
             if (modeCount == 0) return false;
-            if (modeCount != 1) { error = "Укажите только один режим: --check, --install, --uninstall или --self-test."; return false; }
+            if (modeCount != 1) { error = "Укажите только один режим: --check, --install, --uninstall, --launch или --self-test."; return false; }
+            if (String.IsNullOrWhiteSpace(parsed.LogPath) && parsed.Action == "launch") parsed.LogPath = DefaultLaunchLogPath();
             if (String.IsNullOrWhiteSpace(parsed.LogPath)) { error = "Для командного режима обязателен параметр --log <файл>."; return false; }
             if (!parsed.SelfTest && (String.IsNullOrWhiteSpace(parsed.InstallDir) || String.IsNullOrWhiteSpace(parsed.DshHome)))
             { error = "Укажите --install-dir и --dsh-home."; return false; }
@@ -105,10 +108,11 @@ namespace DeepSeekHarnessRu
                     finally { TryDeleteDirectory(extracted); }
                 }
                 object logLock = new object();
-                int exitCode = RunOperation(options.Action, options.InstallDir, options.DshHome, delegate(string line)
-                {
-                    lock (logLock) log.WriteLine(line);
-                }, false);
+                Action<string> writeLine = delegate(string line) { lock (logLock) log.WriteLine(line); };
+                int exitCode = options.Action == "launch"
+                    ? RunLaunch(options.InstallDir, options.DshHome, writeLine, PromptOpenWithoutTranslation)
+                    : RunOperation(options.Action, options.InstallDir, options.DshHome, writeLine, false,
+                        options.Action == "install" || options.Action == "uninstall");
                 return exitCode;
             }
             catch (Exception ex)
@@ -120,7 +124,30 @@ namespace DeepSeekHarnessRu
             finally { if (log != null) log.Dispose(); }
         }
 
-        private static int RunOperation(string action, string installDir, string dshHome, Action<string> writeLine, bool showProcessWarning)
+        private static int RunOperation(string action, string installDir, string dshHome, Action<string> writeLine, bool showProcessWarning, bool setupLauncher = false)
+        {
+            if (action != "install" && action != "uninstall")
+                return RunOperationCore(action, installDir, dshHome, writeLine, showProcessWarning, setupLauncher);
+
+            using (Mutex operationMutex = new Mutex(false, LaunchMutexName(installDir, dshHome)))
+            {
+                bool acquired;
+                try { acquired = operationMutex.WaitOne(TimeSpan.FromSeconds(60)); }
+                catch (AbandonedMutexException) { acquired = true; }
+                if (!acquired)
+                {
+                    const string message = "Другая операция с этим Harness ещё выполняется. Повторите позже.";
+                    writeLine(message);
+                    if (showProcessWarning)
+                        MessageBox.Show(message, "DeepSeek Harness RU", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return 4;
+                }
+                try { return RunOperationCore(action, installDir, dshHome, writeLine, showProcessWarning, setupLauncher); }
+                finally { operationMutex.ReleaseMutex(); }
+            }
+        }
+
+        private static int RunOperationCore(string action, string installDir, string dshHome, Action<string> writeLine, bool showProcessWarning, bool setupLauncher)
         {
             if (!String.Equals(action, "check", StringComparison.OrdinalIgnoreCase) && IsHarnessRunning())
             {
@@ -181,6 +208,14 @@ namespace DeepSeekHarnessRu
                     process.WaitForExit();
                     int result = process.ExitCode;
                     writeLine("Операция завершена. Код: " + result.ToString());
+                    if (result == 0 && setupLauncher && (action == "install" || action == "uninstall"))
+                    {
+                        if (!ConfigurePersistentLauncher(extracted, installDir, dshHome, action == "uninstall", writeLine))
+                        {
+                            writeLine(action == "install" ? "Перевод установлен, но ярлык запуска не создан." : "Перевод удалён, но ярлык остался.");
+                            return 5;
+                        }
+                    }
                     return result;
                 }
             }
@@ -190,6 +225,183 @@ namespace DeepSeekHarnessRu
                 return 1;
             }
             finally { TryDeleteDirectory(extracted); }
+        }
+
+        private static int RunLaunch(string installDir, string dshHome, Action<string> writeLine, Func<string, bool> askOpenWithoutTranslation)
+        {
+            string install = Path.GetFullPath(installDir);
+            string home = Path.GetFullPath(dshHome);
+            string mutexName = LaunchMutexName(install, home);
+            using (Mutex launchMutex = new Mutex(false, mutexName))
+            {
+                bool acquired;
+                try { acquired = launchMutex.WaitOne(TimeSpan.FromSeconds(60)); }
+                catch (AbandonedMutexException) { acquired = true; }
+                if (!acquired)
+                {
+                    const string timeoutMessage = "Другой запуск русификатора ещё выполняется. Повторите запуск позже.";
+                    writeLine(timeoutMessage);
+                    MessageBox.Show(timeoutMessage, "DeepSeek Harness RU", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return 4;
+                }
+                try { return RunLaunchExclusive(install, home, writeLine, askOpenWithoutTranslation); }
+                finally { launchMutex.ReleaseMutex(); }
+            }
+        }
+
+        private static int RunLaunchExclusive(string install, string dshHome, Action<string> writeLine, Func<string, bool> askOpenWithoutTranslation)
+        {
+            string executable = Path.Combine(install, "DeepSeek Harness.exe");
+            if (!File.Exists(executable))
+            {
+                writeLine("Не найден исполняемый файл DeepSeek Harness: " + executable);
+                MessageBox.Show("Не найден исполняемый файл DeepSeek Harness:\n" + executable,
+                    "DeepSeek Harness RU", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return 1;
+            }
+
+            if (IsHarnessRunningFrom(install))
+            {
+                writeLine("DeepSeek Harness из выбранной папки уже работает. Повторная установка перевода пропущена.");
+                return StartHarness(executable, install, dshHome, writeLine);
+            }
+
+            StringBuilder details = new StringBuilder();
+            object detailsLock = new object();
+            int installResult = RunOperation("install", install, dshHome, delegate(string line)
+            {
+                lock (detailsLock)
+                {
+                    if (details.Length > 0) details.AppendLine();
+                    details.Append(line);
+                }
+                writeLine(line);
+            }, false, false);
+            if (installResult == 0) return StartHarness(executable, install, dshHome, writeLine);
+
+            string detailText;
+            lock (detailsLock) detailText = details.ToString();
+            string message = "Не удалось проверить совместимость или установить перевод.\n\n" + detailText +
+                "\n\nОткрыть DeepSeek Harness без перевода?";
+            if (askOpenWithoutTranslation(message))
+            {
+                writeLine("Пользователь выбрал запуск без перевода.");
+                return StartHarness(executable, install, dshHome, writeLine);
+            }
+            writeLine("Запуск отменён. DeepSeek Harness не запущен.");
+            return installResult;
+        }
+
+        private static string LaunchMutexName(string install, string dshHome)
+        {
+            byte[] input = Encoding.UTF8.GetBytes(NormalizeLockPath(install) + "\n" + NormalizeLockPath(dshHome));
+            using (SHA256 sha = SHA256.Create())
+                return "Local\\DeepSeekHarnessRU-" + BitConverter.ToString(sha.ComputeHash(input)).Replace("-", "");
+        }
+
+        private static string NormalizeLockPath(string path)
+        {
+            string full = Path.GetFullPath(path);
+            string root = Path.GetPathRoot(full);
+            if (!String.Equals(full, root, StringComparison.OrdinalIgnoreCase))
+                full = full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return full.ToUpperInvariant();
+        }
+
+        private static int StartHarness(string executable, string installDir, string dshHome, Action<string> writeLine)
+        {
+            try
+            {
+                ProcessStartInfo start = new ProcessStartInfo();
+                start.FileName = executable;
+                start.WorkingDirectory = installDir;
+                start.UseShellExecute = false;
+                start.EnvironmentVariables["DSH_HOME"] = Path.GetFullPath(dshHome);
+                start.WindowStyle = ProcessWindowStyle.Normal;
+                Process process = Process.Start(start);
+                if (process == null) throw new InvalidOperationException("Windows не запустил DeepSeek Harness.");
+                process.Dispose();
+                writeLine("DeepSeek Harness запущен.");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                writeLine("Не удалось запустить DeepSeek Harness: " + ex.Message);
+                MessageBox.Show("Не удалось запустить DeepSeek Harness:\n" + ex.Message,
+                    "DeepSeek Harness RU", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return 1;
+            }
+        }
+
+        private static bool PromptOpenWithoutTranslation(string message)
+        {
+            return MessageBox.Show(message, "DeepSeek Harness RU", MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+        }
+
+        private static string DefaultLaunchLogPath()
+        {
+            string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (String.IsNullOrWhiteSpace(local)) throw new InvalidOperationException("Не удалось определить папку LocalAppData для журнала запуска.");
+            string name = "launch-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + "-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".log";
+            return Path.Combine(local, "DeepSeekHarnessRU", "logs", name);
+        }
+
+        private static bool ConfigurePersistentLauncher(string extracted, string installDir, string dshHome, bool remove, Action<string> writeLine)
+        {
+            try
+            {
+                string script = Path.Combine(extracted, "tools", "setup-launcher.ps1");
+                if (!File.Exists(script))
+                {
+                    writeLine("Ярлык запуска не обновлён: в комплекте отсутствует tools/setup-launcher.ps1.");
+                    return false;
+                }
+                string system = Environment.GetFolderPath(Environment.SpecialFolder.System);
+                string powershell = Path.Combine(system, "WindowsPowerShell", "v1.0", "powershell.exe");
+                if (!File.Exists(powershell)) powershell = "powershell.exe";
+                StringBuilder arguments = new StringBuilder("-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ");
+                arguments.Append(QuoteArgument(script));
+                arguments.Append(" -Mode ").Append(remove ? "Remove" : "Install");
+                arguments.Append(" -SourceExe ").Append(QuoteArgument(Assembly.GetExecutingAssembly().Location));
+                arguments.Append(" -InstallDir ").Append(QuoteArgument(Path.GetFullPath(installDir)));
+                arguments.Append(" -DshHome ").Append(QuoteArgument(Path.GetFullPath(dshHome)));
+
+                ProcessStartInfo start = new ProcessStartInfo();
+                start.FileName = powershell;
+                start.Arguments = arguments.ToString();
+                start.WorkingDirectory = extracted;
+                start.UseShellExecute = false;
+                start.CreateNoWindow = true;
+                start.WindowStyle = ProcessWindowStyle.Hidden;
+                start.RedirectStandardOutput = true;
+                start.RedirectStandardError = true;
+                start.StandardOutputEncoding = new UTF8Encoding(false);
+                start.StandardErrorEncoding = new UTF8Encoding(false);
+                using (Process process = new Process())
+                {
+                    process.StartInfo = start;
+                    process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null) writeLine("[launcher] " + e.Data); };
+                    process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null) writeLine("[launcher] " + e.Data); };
+                    if (!process.Start()) throw new InvalidOperationException("Не удалось запустить скрипт настройки ярлыка.");
+                    process.BeginOutputReadLine();
+                    process.BeginErrorReadLine();
+                    process.WaitForExit();
+                    process.WaitForExit();
+                    if (process.ExitCode != 0)
+                    {
+                        writeLine("Не удалось " + (remove ? "удалить" : "настроить") + " ярлыки запуска; код: " + process.ExitCode.ToString());
+                        return false;
+                    }
+                    writeLine(remove ? "Ярлыки этого русификатора удалены." : "Ярлыки запуска настроены.");
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                writeLine("Не удалось настроить ярлык запуска: " + ex.Message);
+                return false;
+            }
         }
 
         private static string ExtractPayload()
@@ -228,6 +440,28 @@ namespace DeepSeekHarnessRu
         {
             try { return Process.GetProcessesByName("DeepSeek Harness").Length > 0; }
             catch { return false; }
+        }
+
+        private static bool IsHarnessRunningFrom(string installDir)
+        {
+            string expected = Path.GetFullPath(Path.Combine(installDir, "DeepSeek Harness.exe"));
+            try
+            {
+                foreach (Process process in Process.GetProcessesByName("DeepSeek Harness"))
+                {
+                    using (process)
+                    {
+                        try
+                        {
+                            string image = process.MainModule.FileName;
+                            if (String.Equals(Path.GetFullPath(image), expected, StringComparison.OrdinalIgnoreCase)) return true;
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+            return false;
         }
 
         private static string QuoteArgument(string value)
@@ -300,6 +534,7 @@ namespace DeepSeekHarnessRu
             private readonly Button checkButton;
             private readonly Button installButton;
             private readonly Button uninstallButton;
+            private readonly Button launchButton;
             private readonly Label status;
             private bool busy;
 
@@ -310,7 +545,7 @@ namespace DeepSeekHarnessRu
                 FormBorderStyle = FormBorderStyle.FixedDialog;
                 MaximizeBox = false;
                 MinimizeBox = true;
-                ClientSize = new Size(590, 438);
+                ClientSize = new Size(590, 470);
                 Font = new Font("Segoe UI", 9F);
                 BackColor = Color.FromArgb(247, 248, 250);
 
@@ -343,15 +578,18 @@ namespace DeepSeekHarnessRu
                 browseDsh.Click += delegate { Browse(dshPath, "Выберите папку DSH home"); };
                 Controls.Add(browseDsh);
 
-                checkButton = MakeButton("Проверить", 22, 219, 112, 34);
-                installButton = MakeButton("Установить русский", 143, 219, 170, 34);
-                uninstallButton = MakeButton("Удалить перевод", 322, 219, 150, 34);
+                checkButton = MakeButton("Проверить", 22, 219, 93, 34);
+                installButton = MakeButton("Установить русский", 123, 219, 156, 34);
+                uninstallButton = MakeButton("Удалить перевод", 287, 219, 138, 34);
+                launchButton = MakeButton("Запустить Harness", 433, 219, 135, 34);
                 checkButton.Click += delegate { StartAction("check"); };
                 installButton.Click += delegate { StartAction("install"); };
                 uninstallButton.Click += delegate { StartAction("uninstall"); };
+                launchButton.Click += delegate { StartAction("launch"); };
                 Controls.Add(checkButton);
                 Controls.Add(installButton);
                 Controls.Add(uninstallButton);
+                Controls.Add(launchButton);
 
                 status = new Label();
                 status.Text = "Готово";
@@ -360,7 +598,12 @@ namespace DeepSeekHarnessRu
                 status.Size = new Size(540, 22);
                 Controls.Add(status);
 
-                Label logTitle = MakeLabel("Журнал", 22, 288);
+                Label launchInfo = MakeLabel("После обновления или автоматического перезапуска Harness может запуститься напрямую. Если перевод не восстановился, полностью выйдите и откройте ярлык «DeepSeek Harness — Русский».", 22, 286);
+                launchInfo.ForeColor = Color.FromArgb(100, 116, 139);
+                launchInfo.Size = new Size(546, 35);
+                Controls.Add(launchInfo);
+
+                Label logTitle = MakeLabel("Журнал", 22, 324);
                 Controls.Add(logTitle);
                 log = new TextBox();
                 log.Multiline = true;
@@ -369,7 +612,7 @@ namespace DeepSeekHarnessRu
                 log.WordWrap = false;
                 log.BackColor = Color.White;
                 log.Font = new Font("Consolas", 8.5F);
-                log.Location = new Point(22, 311);
+                log.Location = new Point(22, 347);
                 log.Size = new Size(546, 108);
                 Controls.Add(log);
             }
@@ -444,7 +687,9 @@ namespace DeepSeekHarnessRu
                 AppendLog("--- " + DateTime.Now.ToString("HH:mm:ss") + " / " + action + " ---");
                 ThreadPool.QueueUserWorkItem(delegate
                 {
-                    int result = RunOperation(action, install, dsh, AppendLog, true);
+                    int result = action == "launch"
+                        ? RunLaunch(install, dsh, AppendLog, AskOpenWithoutTranslation)
+                        : RunOperation(action, install, dsh, AppendLog, true, action == "install" || action == "uninstall");
                     if (!IsDisposed && IsHandleCreated)
                     {
                         BeginInvoke((MethodInvoker)delegate
@@ -454,6 +699,17 @@ namespace DeepSeekHarnessRu
                         });
                     }
                 });
+            }
+
+            private bool AskOpenWithoutTranslation(string message)
+            {
+                if (IsDisposed || !IsHandleCreated) return false;
+                if (InvokeRequired)
+                {
+                    try { return (bool)Invoke(new Func<string, bool>(PromptOpenWithoutTranslation), new object[] { message }); }
+                    catch (InvalidOperationException) { return false; }
+                }
+                return PromptOpenWithoutTranslation(message);
             }
 
             private void AppendLog(string line)
@@ -480,6 +736,7 @@ namespace DeepSeekHarnessRu
                 checkButton.Enabled = !value;
                 installButton.Enabled = !value;
                 uninstallButton.Enabled = !value;
+                launchButton.Enabled = !value;
                 UseWaitCursor = value;
             }
         }

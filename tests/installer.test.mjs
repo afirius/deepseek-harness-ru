@@ -59,7 +59,8 @@ function fixture() {
   const loc = locations(path.join(dir, 'Harness тест'), path.join(dir, 'home тест'));
   const source = path.join(installed, 'resources/app.asar');
   const live = readArchive(source);
-  const modern = path.join(installed, 'resources/dsh-ru-patch/original-header.json');
+  const persistent = locations(installed, process.env.DSH_TEST_HOME ?? path.join(os.homedir(), '.dsh')).work;
+  const modern = fs.existsSync(path.join(persistent, 'original-header.json')) ? path.join(persistent, 'original-header.json') : path.join(installed, 'resources/dsh-ru-patch/original-header.json');
   const legacy = source + '.unpacked/lib/main.js.header.bak';
   const baseline = fs.existsSync(modern) ? JSON.parse(fs.readFileSync(modern))
     : fs.existsSync(legacy) ? JSON.parse(fs.readFileSync(legacy)) : live.header;
@@ -303,4 +304,44 @@ test('uninstall rejects backup targets outside the locale directories before mut
   const before=fs.readFileSync(loc.asar);
   assert.throws(()=>operate('uninstall',loc,options),/пути резервной/);
   assert.deepEqual(fs.readFileSync(loc.asar),before);
+});
+
+
+test('patch state survives complete replacement of updater-owned resources', {skip:!installed},()=>{
+  const {loc,original,profile}=fixture();operate('install',loc,options);
+  assert.ok(!path.relative(loc.resources,loc.work).startsWith('dsh-ru-patch'));
+  const displaced = path.join(path.dirname(loc.install),'old-resources');
+  assert.equal(path.dirname(displaced),path.dirname(loc.install));
+  fs.renameSync(loc.resources,displaced);
+  fs.mkdirSync(loc.resources,{recursive:true});fs.writeFileSync(loc.asar,original);
+  const updated=rewriteArchive(loc,{'package.json': code=>JSON.stringify({...JSON.parse(code),version:'15.0.0-test'})});
+  operate('install',loc,options);operate('uninstall',loc,options);
+  assert.deepEqual(fs.readFileSync(loc.asar),updated);
+  assert.deepEqual(JSON.parse(fs.readFileSync(loc.manifest)),profile);
+});
+
+test('legacy resources state migrates with rollback snapshots to persistent home', {skip:!installed},()=>{
+  const {loc,original,profile}=fixture();
+  fs.mkdirSync(loc.package,{recursive:true});
+  fs.writeFileSync(path.join(loc.package,'previous.txt'),'keep previous locale');
+  const old={...loc,work:loc.legacyWork,state:loc.legacyState};
+  // Produce the same schema and backup layout used by the old releases.
+  operate('install',old,options);
+  const legacyArchive=readArchive(loc.asar);
+  const oldBaseline=JSON.parse(fs.readFileSync(path.join(old.work,'original-header.json')));
+  const bootPath='dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js';
+  Object.assign(entryFor(legacyArchive.header,bootPath.split('/')),entryFor(oldBaseline,bootPath.split('/')));
+  delete entryFor(legacyArchive.header,bootPath.split('/')).unpacked;
+  fs.writeFileSync(loc.asar,withHeader(legacyArchive,legacyArchive.header));
+  const oldState=JSON.parse(fs.readFileSync(old.state));oldState.entries=oldState.entries.filter(n=>n!==bootPath);oldState.patchVersion='1.1.0';
+  fs.writeFileSync(old.state,JSON.stringify(oldState));
+  assert.equal(fs.existsSync(loc.state),false);
+  operate('install',loc,options);
+  const state=JSON.parse(fs.readFileSync(loc.state));
+  for(const item of state.previousDirectories) assert.ok(item.backup.startsWith(loc.work+path.sep));
+  fs.renameSync(loc.legacyWork,path.join(path.dirname(loc.install),'removed-legacy-backups'));
+  operate('uninstall',loc,options);
+  assert.deepEqual(fs.readFileSync(loc.asar),original);
+  assert.deepEqual(JSON.parse(fs.readFileSync(loc.manifest)),profile);
+  assert.equal(fs.readFileSync(path.join(loc.package,'previous.txt'),'utf8'),'keep previous locale');
 });
