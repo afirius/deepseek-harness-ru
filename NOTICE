@@ -1,0 +1,9 @@
+DeepSeek Harness RU is an unofficial community localization tool.
+DeepSeek and DeepSeek Harness names identify the application being localized;
+they do not imply endorsement or affiliation.
+
+The application executable, ASAR archive, Node.js runtime, account data and
+user conversations are not included in this distribution.
+
+The translations correspond to string identifiers in DeepSeek Harness
+0.1.7-rc.2. Application code is patched locally from the user's installation.

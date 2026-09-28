@@ -1,0 +1,25 @@
+{
+  "name": "@local/dsh-locale-ru",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Russian localization for the DeepSeek Harness web GUI",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "meta": {
+    "title": "Русская локализация",
+    "description": "Русский язык интерфейса DeepSeek Harness: язык и словари строк для веб-интерфейса."
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-locale"]
+    }
+  }
+}

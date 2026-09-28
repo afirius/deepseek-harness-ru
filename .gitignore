@@ -1,0 +1,9 @@
+dist/
+build/
+*.log
+*.asar
+*.bak
+*.reference.cjs
+repair-backup*/
+.dsh/
+node_modules/
