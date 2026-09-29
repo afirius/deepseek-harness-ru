@@ -6,6 +6,7 @@ import os from 'node:os';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { readArchive, withHeader, digest, entryFor, readPacked } from '../tools/shell-asar.mjs';
+import { findObjectLiteral } from '../tools/patch-structure.mjs';
 import { locations, operate, Transaction, recoverPending } from '../tools/installer.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -24,7 +25,7 @@ test('ASAR header uses UTF-8 byte lengths and preserves payload boundary', () =>
 
 test('web plugin registers Russian dictionaries and activates only once', async () => {
   const code = fs.readFileSync(path.join(root, 'payload/locale/client.js'), 'utf8');
-  let factory, changes = 0, registered = 0;
+  let factory, changes = 0, registered = 0, chatDictionary;
   const values = new Map();
   const context = vm.createContext({ console,
     localStorage: { getItem: key => values.get(key), setItem: (key, value) => values.set(key, value) },
@@ -33,16 +34,26 @@ test('web plugin registers Russian dictionaries and activates only once', async 
   const plugin = factory();
   const ctx = { effect: fn => fn(), locale: {
     addLanguage: lang => { assert.equal(lang.id, 'ru'); return () => {}; },
-    register: (ns, lang, dictionary) => { assert.equal(lang, 'ru'); assert.ok(Object.keys(dictionary).length); registered++; return () => {}; },
+    register: (ns, lang, dictionary) => { assert.equal(lang, 'ru'); assert.ok(Object.keys(dictionary).length); if (ns === 'chat') chatDictionary = dictionary; registered++; return () => {}; },
     setLocale: lang => { assert.equal(lang, 'ru'); changes++; }
   } };
   plugin.apply(ctx); await new Promise(resolve => setImmediate(resolve));
   assert.equal(registered, 57); assert.equal(changes, 1);
+  assert.equal(chatDictionary['chat.deepDivingFor'].replace('{duration}', '1 мин 4 с'), 'Глубокое погружение: 1 мин 4 с…');
   plugin.apply(ctx); await new Promise(resolve => setImmediate(resolve));
   assert.equal(changes, 1, 'subsequent manual English selection must be respected');
 });
 
 const installed = process.env.DSH_TEST_INSTALL;
+test('Russian chat catalog covers the current Harness English keys', { skip: !installed }, () => {
+  const archive = readArchive(path.join(installed, 'resources/app.asar'));
+  const name = 'dsh/node_modules/@deepseek-ai/dsh-client-ui-chat/lib/client.js';
+  const entry = entryFor(archive.header, name.split('/'));
+  assert.ok(entry && !entry.unpacked, 'chat UI source must be packed in the checked build');
+  const englishKeys = findObjectLiteral(readPacked(archive, entry).toString('utf8'), 'en').keys;
+  const russian = JSON.parse(fs.readFileSync(path.join(root, 'payload/locale/dictionaries.json'), 'utf8')).chat;
+  assert.deepEqual(englishKeys.filter(key => !(key in russian)), []);
+});
 const fixtureDirectories = [];
 after(() => {
   const temporaryRoot = fs.realpathSync(os.tmpdir());
